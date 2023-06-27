@@ -125,7 +125,6 @@ export function compileFiles(
 	benchmarkIfVerbose(`Building reverse mapping..`, () => {
 		const mapping: Record<string, Array<string>> = {};
 		walkRojoSourceMap(mapping, sourceMap);
-		fs.outputFileSync("./mapping.json", JSON.stringify(mapping));
 	});
 
 	const multiTransformState = new MultiTransformState();
