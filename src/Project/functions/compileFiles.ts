@@ -1,6 +1,8 @@
 import { renderAST } from "@roblox-ts/luau-ast";
 import { NetworkType, RbxPath, RojoResolver } from "@roblox-ts/rojo-resolver";
+import { execSync } from "child_process";
 import fs from "fs-extra";
+import { lookpath } from "lookpath";
 import path from "path";
 import { checkFileName } from "Project/functions/checkFileName";
 import { checkRojoConfig } from "Project/functions/checkRojoConfig";
@@ -56,6 +58,30 @@ function getReverseSymlinkMap(program: ts.Program) {
 	return result;
 }
 
+interface RojoSourceMap {
+	name: string;
+	className: string;
+	filePaths?: ReadonlyArray<string>;
+	children?: ReadonlyArray<RojoSourceMap>;
+}
+
+function walkRojoSourceMap(
+	mapping: Record<string, Array<string>>,
+	rojoSourceMap: RojoSourceMap,
+	rbxPath: Array<string> = [],
+) {
+	if (rojoSourceMap.filePaths) {
+		for (const filePath of rojoSourceMap.filePaths) {
+			mapping[filePath] = rbxPath;
+		}
+	}
+	if (rojoSourceMap.children) {
+		for (const child of rojoSourceMap.children) {
+			walkRojoSourceMap(mapping, child, [...rbxPath, child.name]);
+		}
+	}
+}
+
 /**
  * 'transpiles' TypeScript project into a logically identical Luau project.
  *
@@ -69,13 +95,49 @@ export function compileFiles(
 ): ts.EmitResult {
 	const compilerOptions = program.getCompilerOptions();
 
+	benchmarkIfVerbose(`Pre-writing emit files..`, () => {
+		for (const sourceFile of sourceFiles) {
+			fs.ensureFileSync(pathTranslator.getOutputPath(sourceFile.fileName));
+		}
+	});
+
+	if (!lookpath("rojo")) {
+		return emitResultFailure("Could not find rojo!");
+	}
+
+	let sourceMap!: RojoSourceMap;
+	let sourceMapRaw!: Buffer;
+
+	benchmarkIfVerbose(`Generating Rojo source map..`, () => {
+		sourceMapRaw = execSync("rojo sourcemap", {
+			cwd: data.rojoConfigPath ? path.dirname(data.rojoConfigPath) : undefined,
+		});
+	});
+
+	benchmarkIfVerbose(`Caching Rojo source map..`, () => {
+		fs.outputFileSync(path.join(compilerOptions.outDir!, "sourcemap"), sourceMapRaw);
+	});
+
+	benchmarkIfVerbose(`Parsing Rojo source map..`, () => {
+		sourceMap = JSON.parse(sourceMapRaw.toString());
+	});
+
+	benchmarkIfVerbose(`Building reverse mapping..`, () => {
+		const mapping: Record<string, Array<string>> = {};
+		walkRojoSourceMap(mapping, sourceMap);
+		fs.outputFileSync("./mapping.json", JSON.stringify(mapping));
+	});
+
 	const multiTransformState = new MultiTransformState();
 
 	const outDir = compilerOptions.outDir!;
 
-	const rojoResolver = data.rojoConfigPath
-		? RojoResolver.fromPath(data.rojoConfigPath)
-		: RojoResolver.synthetic(outDir);
+	let rojoResolver!: RojoResolver;
+	benchmarkIfVerbose(`Creating root RojoResolver..`, () => {
+		rojoResolver = data.rojoConfigPath
+			? RojoResolver.fromPath(data.rojoConfigPath)
+			: RojoResolver.synthetic(outDir);
+	});
 
 	for (const warning of rojoResolver.getWarnings()) {
 		LogService.warn(warning);
@@ -89,7 +151,11 @@ export function compileFiles(
 		}
 	}
 
-	const pkgRojoResolvers = compilerOptions.typeRoots!.map(RojoResolver.synthetic);
+	let pkgRojoResolvers!: Array<RojoResolver>;
+	benchmarkIfVerbose(`Creating package RojoResolvers..`, () => {
+		pkgRojoResolvers = compilerOptions.typeRoots!.map(RojoResolver.synthetic);
+	});
+
 	const nodeModulesPathMapping = createNodeModulesPathMapping(compilerOptions.typeRoots!);
 
 	const reverseSymlinkMap = getReverseSymlinkMap(program);
