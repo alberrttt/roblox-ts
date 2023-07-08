@@ -9,8 +9,6 @@ import { transformPropertyDeclaration } from "TSTransformer/nodes/class/transfor
 import { transformExpression } from "TSTransformer/nodes/expressions/transformExpression";
 import { transformIdentifierDefined } from "TSTransformer/nodes/expressions/transformIdentifier";
 import { transformMethodDeclaration } from "TSTransformer/nodes/transformMethodDeclaration";
-import { convertToIndexableExpression } from "TSTransformer/util/convertToIndexableExpression";
-import { extendsRoactComponent } from "TSTransformer/util/extendsRoactComponent";
 import { getExtendsNode } from "TSTransformer/util/getExtendsNode";
 import { getKindName } from "TSTransformer/util/getKindName";
 import { getOriginalSymbolOfNode } from "TSTransformer/util/getOriginalSymbolOfNode";
@@ -37,60 +35,6 @@ function createNameFunction(name: string) {
 		parameters: luau.list.make(),
 		hasDotDotDot: false,
 	});
-}
-
-function createRoactBoilerplate(
-	state: TransformState,
-	node: ts.ClassLikeDeclaration,
-	className: luau.Identifier | luau.TemporaryIdentifier,
-	isClassExpression: boolean,
-) {
-	const extendsNode = getExtendsNode(node);
-	assert(extendsNode);
-
-	const statements = luau.list.make<luau.Statement>();
-
-	const [extendsExp, extendsExpPrereqs] = state.capture(() => transformExpression(state, extendsNode.expression));
-	luau.list.pushList(statements, extendsExpPrereqs);
-
-	const classNameStr = luau.isIdentifier(className) ? className.name : "Anonymous";
-
-	const right = luau.create(luau.SyntaxKind.MethodCallExpression, {
-		expression: convertToIndexableExpression(extendsExp),
-		name: "extend",
-		args: luau.list.make(luau.string(classNameStr)),
-	});
-
-	if (isClassExpression && node.name) {
-		luau.list.push(
-			statements,
-			luau.create(luau.SyntaxKind.VariableDeclaration, {
-				left: transformIdentifierDefined(state, node.name),
-				right,
-			}),
-		);
-	} else {
-		luau.list.push(
-			statements,
-			luau.create(luau.SyntaxKind.Assignment, {
-				left: className,
-				operator: "=",
-				right,
-			}),
-		);
-	}
-
-	return statements;
-}
-
-function getExtendsDeclaration(state: TransformState, extendsExp: ts.Expression) {
-	if (ts.isClassLike(extendsExp)) {
-		return extendsExp;
-	}
-	const symbol = state.typeChecker.getSymbolAtLocation(extendsExp);
-	if (symbol && symbol.valueDeclaration && ts.isClassLike(symbol.valueDeclaration)) {
-		return symbol.valueDeclaration;
-	}
 }
 
 function createBoilerplate(
@@ -144,11 +88,6 @@ function createBoilerplate(
 		);
 
 		if (extendsNode) {
-			const extendsDec = getExtendsDeclaration(state, extendsNode.expression);
-			if (extendsDec && extendsRoactComponent(state, extendsDec)) {
-				DiagnosticService.addDiagnostic(errors.noRoactInheritance(node));
-			}
-
 			const [extendsExp, extendsExpPrereqs] = state.capture(() =>
 				transformExpression(state, extendsNode.expression),
 			);
@@ -331,15 +270,9 @@ export function transformClassLikeDeclaration(state: TransformState, node: ts.Cl
 		DiagnosticService.addDiagnostic(errors.noMacroExtends(node));
 	}
 
-	const isRoact = extendsRoactComponent(state, node);
-
 	// OOP boilerplate + class functions
 	const statementsInner = luau.list.make<luau.Statement>();
-	if (isRoact) {
-		luau.list.pushList(statementsInner, createRoactBoilerplate(state, node, internalName, isClassExpression));
-	} else {
-		luau.list.pushList(statementsInner, createBoilerplate(state, node, internalName, isClassExpression));
-	}
+	luau.list.pushList(statementsInner, createBoilerplate(state, node, internalName, isClassExpression));
 
 	luau.list.pushList(statementsInner, transformClassConstructor(state, node, internalName, getConstructor(node)));
 
@@ -347,8 +280,7 @@ export function transformClassLikeDeclaration(state: TransformState, node: ts.Cl
 		if (
 			(ts.isPropertyDeclaration(member) || ts.isMethodDeclaration(member)) &&
 			(ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) &&
-			(luau.isReservedClassField(member.name.text) ||
-				(isRoact && luau.isReservedRoactClassField(member.name.text)))
+			luau.isReservedClassField(member.name.text)
 		) {
 			DiagnosticService.addDiagnostic(errors.noReservedClassFields(member.name));
 		}
